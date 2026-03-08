@@ -160,7 +160,7 @@ Every Claude Code session in this repo MUST follow these three rules:
 Before starting any work, run:
 
 ```bash
-gh issue list --repo taqtiqa-mark/uclaw --state open --limit 20
+gh issue list --repo qhkm/zeptoclaw --state open --limit 20
 ```
 
 Present the open issues to the user and ask what they want to work on. If they pick an existing issue, reference it throughout the session.
@@ -170,7 +170,7 @@ Present the open issues to the user and ask what they want to work on. If they p
 When the user requests work that has no matching open issue (new feature, bug fix, refactor), create one **before writing code**:
 
 ```bash
-gh issue create --repo taqtiqa-mark/uclaw \
+gh issue create --repo qhkm/zeptoclaw \
   --title "feat: short description" \
   --label "feat,area:tools" \
   --body "Brief description of the work."
