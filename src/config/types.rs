@@ -1896,6 +1896,7 @@ impl Default for SkillsConfig {
             workspace_dir: None,
             always_load: Vec::new(),
             disabled: Vec::new(),
+            github_token: None,
         }
     }
 }
