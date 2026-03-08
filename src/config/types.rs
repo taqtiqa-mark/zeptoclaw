@@ -1884,6 +1884,9 @@ pub struct SkillsConfig {
     /// Built-in or workspace skills to disable by name.
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Optional GitHub token for skill search deep scanning.
+    #[serde(default)]
+    pub github_token: Option<String>,
 }
 
 impl Default for SkillsConfig {
