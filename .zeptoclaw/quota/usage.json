@@ -1,0 +1,7 @@
+{
+  "anthropic": {
+    "period_key": "2026-03",
+    "cost_usd": 60.0,
+    "tokens": 30000
+  }
+}

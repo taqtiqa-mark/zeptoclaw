@@ -1,18 +1,34 @@
-# Containerized Devtools (Podman Rootless)
+# Containerized Devtools
 
 ## Quick Setup
 
-**Podman** rootless (docker dropped).
+**docker/podman** installed.
 
-**Admin (one-time)**: `usermod --add-subuids 100000-165535 --add-subgids 100000-165535 $USER; podman system migrate`
+**Build dev image** (one-time, pre-clippy/nextest ~2min):
+```
+**Docker:** `docker build -f Dockerfile.dev -t zeptodev .`
+**Podman:** `podman build -f Dockerfile.dev -t localhost/zeptodev .`  # localhost/ avoids short-name error
+```
+Fallback: rust:1.88-slim (rustup install each run ~20s).
 
-**sccache (required)**:
+**Podman** (macOS/WSL):
+```
+podman machine init
+podman machine start
+```
+
+**Volumes** (podman only, pre-run once):
+```
+podman volume create zeptoclaw-target_cache zeptoclaw-registry_cache zeptoclaw-benches_cache zeptoclaw-sccache
+```
+
+**sccache** opt (faster compiles):
 Host: `curl -sSf https://raw.githubusercontent.com/mozilla/sccache/master/install.sh | sh`
-Env: `export RUSTC_WRAPPER=sccache && source ~/.bashrc`
+Env: `export RUSTC_WRAPPER=sccache` (add to ~/.bashrc)
 
 ## Usage
 
-```bash
+```
 # Tests
 ./scripts/test-container.sh lib                    # cargo nextest --lib
 ./scripts/test-container.sh integration            # cargo test
@@ -31,6 +47,8 @@ CONTAINER_RUNTIME=podman ./scripts/test-container.sh lib
 ./scripts/test-container.sh lib --sccache
 ```
 
+**Dry-run:** Scripts print docker/podman cmd if `echo DRY_RUN=1 ./scripts/...`
+
 ## Cache Prune
 
 **Docker:** `docker builder prune --filter type=cache`
@@ -39,11 +57,9 @@ CONTAINER_RUNTIME=podman ./scripts/test-container.sh lib
 
 ## Pre-Push Workflow (Recommended)
 
-```bash
 ./scripts/lint-container.sh
 ./scripts/test-container.sh lib
 ./scripts/bench-container.sh
-```
 
 Add to .git/hooks/pre-push for auto.
 
