@@ -294,6 +294,31 @@ cargo fmt -- --check
 
 See [CLAUDE.md](CLAUDE.md) for full architecture reference, [AGENTS.md](AGENTS.md) for coding guidelines, and [docs/](docs/) for benchmarks, multi-tenant deployment, and performance guides.
 
+## Zepto Stack
+
+ZeptoClaw is part of the Zepto stack — a modular system for running AI agents in production.
+
+```
+ZeptoPM        — orchestration, supervision, retries, job lifecycle
+    │
+    │  create(spec) + spawn(worker, args, env)
+    ▼
+ZeptoCapsule   — capsule creation, process isolation, resource enforcement
+    │
+    │  fork/namespace/microVM + stdio transport
+    ▼
+ZeptoClaw      — LLM calls, tool use, artifact production
+    │
+    └── JSON-line IPC over stdin/stdout back to ZeptoPM
+```
+
+| Layer | Repo | Role |
+|:------|:-----|:-----|
+| **ZeptoPM** | [qhkm/zeptopm](https://github.com/qhkm/zeptopm) | Process manager — config-driven daemon, HTTP API, pipelines, orchestration |
+| **ZeptoCapsule** | [qhkm/zeptocapsule](https://github.com/qhkm/zeptocapsule) | Sandbox — process/namespace/Firecracker isolation, resource limits, fallback chains |
+| **ZeptoRT** | [qhkm/zeptort](https://github.com/qhkm/zeptort) | Durable runtime — journaled effects, snapshot recovery, OTP-style supervision |
+| **ZeptoClaw** | [qhkm/zeptoclaw](https://github.com/qhkm/zeptoclaw) | Agent framework — 32 tools, 9 providers, 9 channels, container isolation |
+
 ## Contributing
 
 We welcome contributions! Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for:
