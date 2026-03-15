@@ -1,40 +1,63 @@
-FROM rust:1.93.0-slim
+# ZeptoClaw Development Dockerfile
+# Uses BuildKit cache mounts for fast incremental builds.
+#
+# Docker:  DOCKER_BUILDKIT=1 docker build -f Dockerfile.dev -t zeptoclaw:dev .
+# Podman:  podman build -f Dockerfile.dev -t zeptoclaw:dev .
+#
+# Or use the helper script:
+#   ./scripts/lint-container.sh
+#   ./scripts/lint-container.sh --no-cache
 
-# 1. Install system dependencies
-RUN apt-get update && apt-get install --no-install-recommends -y \
-    pkg-config libssl-dev protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
+# syntax=docker/dockerfile:1
 
-# 2. Install global tools (these persist in the image layer)
-RUN cargo install cargo-nextest@0.9.130 --locked
-RUN rustup component add clippy rustfmt
+FROM rust:1.93-slim-trixie AS builder
 
-# 3. Baked configs
-COPY scripts/artifacts/clippy.toml /clippy.toml
-# Podman rootless tutorial: no USER needed (--userns=keep-id maps host uid)
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup component add clippy rustfmt
 
-# 4. Pre-compile dependencies (The "Warming" Step)
-ENV PATH="/usr/local/cargo/bin:${PATH}"
-WORKDIR /src
+WORKDIR /app
 
-# 5. Prepare dummy files to bake dependencies into the cache volumes
-RUN mkdir -p src benches && \
+COPY Cargo.toml Cargo.lock* ./
+
+# Dummy source for dependency-only build (cached layer)
+RUN mkdir -p src/bin benches && \
     echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > src/bin/benchmark.rs && \
+    echo "pub fn lib() {}" > src/lib.rs && \
     echo "fn main() {}" > benches/message_bus.rs
 
-COPY Cargo.toml Cargo.lock ./
+# Build dependencies with cargo registry + target caches
+# mount flags: stripped automatically by lint-container.sh --fallback for old Podman
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/app/target cargo build --release && rm -rf src benches
 
-# 6. Build dependencies (this uses the volumes mounted in the build command)
-RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
-    --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
-    ls -ld /src/target && cargo build && rm -rf src benches
+COPY src ./src
+COPY benches ./benches
+RUN touch src/main.rs src/lib.rs
 
-# 7. NOW copy the real source (this won't be clobbered because the dummy is gone)
-COPY . .
+# Build, clippy, fmt check — all in one layer sharing the cache
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/app/target cargo build --release --bin zeptoclaw && cargo clippy -- -D warnings && cargo fmt -- --check && cp /app/target/release/zeptoclaw /usr/local/bin/zeptoclaw
 
-# 8. Compile dependencies
-RUN --mount=type=cache,id=zeptoclaw-registry,target=/usr/local/cargo/registry,U \
-    --mount=type=cache,id=zeptoclaw-target,target=/src/target,U \
-    cargo build
+# Runtime stage (same as production Dockerfile)
+FROM debian:trixie-slim AS runtime
 
-CMD ["/bin/bash"]
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    git \
+    gosu \
+    wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -s /bin/false -d /data zeptoclaw
+
+COPY --from=builder /usr/local/bin/zeptoclaw /usr/local/bin/
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV RUST_LOG=zeptoclaw=info
+EXPOSE 8080 9090
+VOLUME /data
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["zeptoclaw", "--help"]
