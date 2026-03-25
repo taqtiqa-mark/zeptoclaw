@@ -42,6 +42,11 @@ Be selective: only save what would be useful in future conversations.";
 /// Maximum wall-clock time (in seconds) allowed for the memory flush LLM turn.
 const MEMORY_FLUSH_TIMEOUT_SECS: u64 = 10;
 
+/// Maximum text document size (in bytes) to inline into message content.
+const MAX_TEXT_DOCUMENT_SIZE: usize = 100 * 1024; // 100KB
+/// Maximum image size (in bytes) to validate and process.
+const MAX_IMAGE_SIZE: usize = 20 * 1024 * 1024; // 20MB
+
 const INTERACTIVE_CLI_METADATA_KEY: &str = "interactive_cli";
 const TRUSTED_LOCAL_SESSION_METADATA_KEY: &str = "trusted_local_session";
 
@@ -236,11 +241,12 @@ fn propagate_routing_metadata(outbound: &mut OutboundMessage, inbound: &InboundM
 
 /// Convert an inbound message with optional media attachments into a session Message.
 ///
-/// If the inbound message has image media with inline binary data, each image is
-/// base64-encoded and attached as a `ContentPart::Image`.  Non-image media and
-/// attachments without data are silently skipped.  Validation (size, MIME type)
-/// is applied via [`crate::session::media::validate_image`]; invalid images are
-/// skipped rather than aborting.
+/// - Image media with inline binary data are base64-encoded and attached as `ContentPart::Image`.
+/// - Text document media (text/plain, text/*, application/json) are decoded and appended to message content.
+/// - Other media types and attachments without data are silently skipped.
+///
+/// Validation (size, MIME type) is applied via [`crate::session::media::validate_image`];
+/// invalid images are skipped rather than aborting.
 ///
 /// When a `MediaStore` is provided the raw bytes are written to disk first and
 /// the resulting relative path is stored as `ImageSource::FilePath`; otherwise
@@ -260,8 +266,59 @@ async fn inbound_to_message(
         .filter(|m| m.data.is_some())
         .collect();
 
+    // Extract text documents and append to content
+    let text_docs: Vec<&crate::bus::MediaAttachment> = msg
+        .media
+        .iter()
+        .filter(|m| matches!(m.media_type, crate::bus::MediaType::Document))
+        .filter(|m| m.data.is_some())
+        .filter(|m| {
+            // Only process text-based documents
+            if let Some(mime) = m.mime_type.as_deref() {
+                mime.starts_with("text/") || mime == "application/json"
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    let mut content = msg.content.clone();
+
+    // Append text document content
+    for doc in text_docs {
+        let data = doc.data.as_ref().unwrap();
+        // Skip documents larger than 100KB to prevent context overflow
+        if data.len() > MAX_TEXT_DOCUMENT_SIZE {
+            if let Some(name) = doc.filename.as_deref() {
+                let size_mb = (data.len() as f64) / (1024.0 * 1024.0);
+                content.push_str(&format!(
+                    "\n\n[Text file '{}' too large ({:.1} MB), skipped]",
+                    name, size_mb
+                ));
+            }
+            continue;
+        }
+
+        match std::str::from_utf8(data) {
+            Ok(text) => {
+                let filename = doc.filename.as_deref().unwrap_or("attachment");
+                content.push_str(&format!(
+                    "\n\n--- Begin file: {} ---\n{}\n--- End file: {} ---",
+                    filename,
+                    text.trim(),
+                    filename
+                ));
+            }
+            Err(_) => {
+                if let Some(name) = doc.filename.as_deref() {
+                    content.push_str(&format!("\n\n[File '{}' is not valid UTF-8 text]", name));
+                }
+            }
+        }
+    }
+
     if image_media.is_empty() {
-        return crate::session::Message::user(&msg.content);
+        return crate::session::Message::user(&content);
     }
 
     let mut image_parts: Vec<ContentPart> = Vec::new();
@@ -270,7 +327,7 @@ async fn inbound_to_message(
         let mime = attachment.mime_type.as_deref().unwrap_or("image/jpeg");
 
         // Skip images that fail size/type validation.
-        if validate_image(data, mime, 20 * 1024 * 1024).is_err() {
+        if validate_image(data, mime, MAX_IMAGE_SIZE).is_err() {
             continue;
         }
 
@@ -294,9 +351,9 @@ async fn inbound_to_message(
     }
 
     if image_parts.is_empty() {
-        crate::session::Message::user(&msg.content)
+        crate::session::Message::user(&content)
     } else {
-        crate::session::Message::user_with_images(&msg.content, image_parts)
+        crate::session::Message::user_with_images(&content, image_parts)
     }
 }
 
@@ -902,10 +959,18 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
+        // Resolve the inbound message content first (inlines text attachments) so the
+        // injection scanner sees the fully-expanded prompt, not just msg.content.
+        let user_message = inbound_to_message(msg, None).await;
+        let resolved_user_prompt = user_message.content.clone();
+
         // Tiered inbound injection scanning: block untrusted channels, warn others.
-        // Runs before any LLM call so injected payloads never reach the model.
+        // Runs before provider resolution so injected payloads are rejected immediately
+        // without touching the session or LLM.
+        // Scans the RESOLVED content (after text attachments are inlined) so injected
+        // payloads in attachments never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
-            let scan = crate::safety::sanitizer::check_injection(&msg.content);
+            let scan = crate::safety::sanitizer::check_injection(&resolved_user_prompt);
             if scan.was_modified {
                 let channel = msg.channel.as_str();
                 match channel {
@@ -946,8 +1011,8 @@ impl AgentLoop {
             }
         }
 
-        // Resolve the provider early and avoid holding the RwLock across multi-second LLM
-        // calls and tool executions, which would block set_provider() writes.
+        // Resolve the provider. Held until end of the function but not across
+        // awaits that would block set_provider() writes for long.
         let provider = self
             .resolve_provider_for_message(msg)
             .await
@@ -989,19 +1054,14 @@ impl AgentLoop {
             }
         }
 
-        // Convert the inbound message to a session Message, attaching any image
-        // media as ContentPart::Image entries (base64-encoded inline).
-        // The user message is added to the session *before* building the context
-        // so that the history slice passed to the provider already contains images
-        // for the current turn.
-        let user_message = inbound_to_message(msg, None).await;
+        // Add the user message to the session after passing injection checks.
         session.add_message(user_message);
 
         // Build messages with history and per-message memory override.
         // Pass an empty user_input string: the current user message is already
         // in session.messages above, so we must not add a duplicate plain-text
         // entry here.
-        let memory_override = self.build_memory_override(&msg.content).await;
+        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
         let messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
@@ -1039,7 +1099,7 @@ impl AgentLoop {
             ResponseCache::cache_key(
                 self.config.agents.defaults.model.as_str(),
                 system_prompt,
-                &msg.content,
+                &resolved_user_prompt,
             )
         });
 
@@ -1629,9 +1689,18 @@ impl AgentLoop {
         self.tool_call_limit.reset();
         self.token_budget.reset();
 
+        // Resolve the inbound message content first (inlines text attachments) so the
+        // injection scanner sees the fully-expanded prompt, not just msg.content.
+        let user_message = inbound_to_message(msg, None).await;
+        let resolved_user_prompt = user_message.content.clone();
+
         // Tiered inbound injection scanning (streaming path).
+        // Runs before provider resolution so injected payloads are rejected immediately
+        // without touching the session or LLM.
+        // Scans the RESOLVED content (after text attachments are inlined) so injected
+        // payloads in attachments never reach the model.
         if self.config.safety.enabled && self.config.safety.injection_check_enabled {
-            let scan = crate::safety::sanitizer::check_injection(&msg.content);
+            let scan = crate::safety::sanitizer::check_injection(&resolved_user_prompt);
             if scan.was_modified {
                 let channel = msg.channel.as_str();
                 match channel {
@@ -1711,13 +1780,11 @@ impl AgentLoop {
             }
         }
 
-        // Convert inbound message to a session Message with image content parts,
-        // then add it to the session before building the provider message list.
-        let user_message = inbound_to_message(msg, None).await;
+        // Add the user message to the session after passing injection checks.
         session.add_message(user_message);
 
         // Pass an empty user_input: the current user message is already in session.
-        let memory_override = self.build_memory_override(&msg.content).await;
+        let memory_override = self.build_memory_override(&resolved_user_prompt).await;
         let messages = self
             .build_resolved_messages(&session, memory_override.as_deref())
             .await;
@@ -4141,6 +4208,145 @@ mod tests {
         } else {
             panic!("Expected Image content part");
         }
+    }
+
+    // ----------------------------------------------------------------
+    // inbound_to_message tests — text document inlining
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_inbound_to_message_appends_text_document() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        let content = b"hello from attachment".to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("note.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "Check this").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("--- Begin file: note.txt ---"),
+            "should contain begin marker"
+        );
+        assert!(
+            result.content.contains("hello from attachment"),
+            "should contain file content"
+        );
+        assert!(
+            result.content.contains("--- End file: note.txt ---"),
+            "should contain end marker"
+        );
+        assert!(
+            result.content.starts_with("Check this"),
+            "original message should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_appends_json_document() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        let content = br#"{"key":"value"}"#.to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("application/json")
+            .with_filename("data.json");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "parse this").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(result.content.contains("--- Begin file: data.json ---"));
+        assert!(result.content.contains(r#"{"key":"value"}"#));
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_oversized_text_document_shows_skip_message() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // Create data just over 100KB
+        let content = vec![b'a'; MAX_TEXT_DOCUMENT_SIZE + 1];
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("big.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "big file").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("big.txt"),
+            "filename should appear in skip message"
+        );
+        assert!(
+            result.content.contains("too large"),
+            "skip message should mention size"
+        );
+        assert!(
+            result.content.contains("MB"),
+            "skip message should use MB units"
+        );
+        assert!(
+            !result.content.contains("--- Begin file:"),
+            "oversized file should not be inlined"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_non_utf8_document_shows_skip_message() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // Invalid UTF-8 bytes
+        let content = vec![0xFF, 0xFE, 0x00, 0x01];
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("text/plain")
+            .with_filename("binary.txt");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "bad file").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert!(
+            result.content.contains("binary.txt"),
+            "filename should appear in error message"
+        );
+        assert!(
+            result.content.contains("not valid UTF-8"),
+            "should report encoding error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_binary_document_type_ignored() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // A PDF-like MIME type on a Document attachment — should be silently ignored
+        // because inbound_to_message only processes text/* and application/json.
+        let content = b"%PDF-1.4".to_vec();
+        let media = MediaAttachment::new(MediaType::Document)
+            .with_data(content)
+            .with_mime_type("application/pdf")
+            .with_filename("doc.pdf");
+        let msg = InboundMessage::new("discord", "user1", "chat1", "read pdf").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        // PDF should neither be inlined nor produce an error — it just has no effect
+        assert_eq!(
+            result.content, "read pdf",
+            "unsupported document MIME type should leave content unchanged"
+        );
+        assert!(!result.content.contains("--- Begin file:"));
+    }
+
+    #[tokio::test]
+    async fn test_inbound_to_message_document_without_data_ignored() {
+        use crate::bus::{MediaAttachment, MediaType};
+
+        // A document with no data blob should be silently skipped
+        let media = MediaAttachment::new(MediaType::Document).with_mime_type("text/plain");
+        let msg =
+            InboundMessage::new("discord", "user1", "chat1", "empty attachment").with_media(media);
+
+        let result = inbound_to_message(&msg, None).await;
+        assert_eq!(result.content, "empty attachment");
     }
 
     #[tokio::test]

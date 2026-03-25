@@ -51,6 +51,10 @@ const MAX_RECONNECT_DELAY_SECS: u64 = 120;
 const BASE_RECONNECT_DELAY_SECS: u64 = 2;
 /// Maximum number of consecutive reconnect attempts before resetting backoff.
 const MAX_RECONNECT_ATTEMPTS: u32 = 10;
+/// Maximum time (in seconds) to wait for attachment download to prevent blocking the gateway loop.
+const ATTACHMENT_FETCH_TIMEOUT_SECS: u64 = 10;
+/// Maximum attachment size (in bytes) to download from Discord.
+const MAX_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024; // 20MB
 
 /// Discord Gateway intents bitmask.
 /// GUILDS (1 << 0) | GUILD_MESSAGES (1 << 9) | DIRECT_MESSAGES (1 << 12) | MESSAGE_CONTENT (1 << 15)
@@ -1055,38 +1059,103 @@ impl DiscordChannel {
                                                             if let Some(mut inbound) =
                                                                 Self::parse_message_create(data, &allowlist, deny_by_default)
                                                             {
-                                                                // Download image attachments
+                                                                // Download image and text document attachments
                                                                 if let Ok(msg_data) = serde_json::from_value::<MessageCreateData>(data.clone()) {
+                                                                    let mut attachment_info = Vec::new();
                                                                     for att in &msg_data.attachments {
-                                                                        if let Some(ref ct) = att.content_type {
-                                                                            if ct.starts_with("image/")
-                                                                                && att.size.is_none_or(|s| s <= 20 * 1024 * 1024)
-                                                                            {
-                                                                                match client.get(&att.url).send().await {
-                                                                                    Ok(resp) => {
-                                                                                        if let Ok(bytes) = resp.bytes().await {
-                                                                                            let mut media = MediaAttachment::new(MediaType::Image)
-                                                                                                .with_data(bytes.to_vec())
-                                                                                                .with_mime_type(ct);
-                                                                                            if let Some(ref name) = att.filename {
-                                                                                                media = media.with_filename(name);
-                                                                                            }
-                                                                                            inbound = inbound.with_media(media);
-                                                                                        }
+                                                                        let filename = att.filename.as_deref().unwrap_or("unknown");
+
+                                                                        // Skip if no content type
+                                                                        if att.content_type.is_none() {
+                                                                            attachment_info.push(format!("[Attachment: {} (no content type, skipped)]", filename));
+                                                                            continue;
+                                                                        }
+
+                                                                        // Skip if size is too large (>20MB)
+                                                                        if att.size.is_some_and(|s| s > MAX_ATTACHMENT_SIZE) {
+                                                                            let size_mb = (att.size.unwrap_or(0) as f64) / (1024.0 * 1024.0);
+                                                                            attachment_info.push(format!("[Attachment: {} (too large: {:.1} MB)]", filename, size_mb));
+                                                                            continue;
+                                                                        }
+
+                                                                        let content_type = att.content_type.as_ref().unwrap();
+
+                                                                        // Determine media type - only handle images and text documents
+                                                                        let media_type = if content_type.starts_with("image/") {
+                                                                            Some(MediaType::Image)
+                                                                        } else if content_type.starts_with("text/")
+                                                                            || content_type == "application/json" {
+                                                                            Some(MediaType::Document)
+                                                                        } else {
+                                                                            None
+                                                                        };
+
+                                                                        if let Some(mt) = media_type {
+                                                                            // Fetch attachment with timeout to avoid blocking gateway loop
+                                                                            let fetch_timeout = Duration::from_secs(ATTACHMENT_FETCH_TIMEOUT_SECS);
+                                                                            let fetch_result = tokio::time::timeout(
+                                                                                fetch_timeout,
+                                                                                async {
+                                                                                    let bytes = client
+                                                                                        .get(&att.url)
+                                                                                        .send()
+                                                                                        .await?
+                                                                                        .error_for_status()?
+                                                                                        .bytes()
+                                                                                        .await?;
+                                                                                    Ok::<_, reqwest::Error>(bytes)
+                                                                                }
+                                                                            ).await;
+
+                                                                            match fetch_result {
+                                                                                Ok(Ok(bytes)) => {
+                                                                                    // Successfully downloaded - add media attachment.
+                                                                                    // No metadata line needed: images display visually,
+                                                                                    // text docs get inlined with full content by inbound_to_message().
+                                                                                    let mut media = MediaAttachment::new(mt.clone())
+                                                                                        .with_data(bytes.to_vec())
+                                                                                        .with_mime_type(content_type);
+                                                                                    if let Some(ref name) = att.filename {
+                                                                                        media = media.with_filename(name);
                                                                                     }
-                                                                                    Err(e) => warn!("Failed to download Discord attachment: {}", e),
+                                                                                    inbound = inbound.with_media(media);
+                                                                                }
+                                                                                Ok(Err(e)) => {
+                                                                                    warn!("Failed to download Discord attachment {}: {}", filename, e);
+                                                                                    attachment_info.push(format!("[Attachment: {} (download failed)]", filename));
+                                                                                }
+                                                                                Err(_) => {
+                                                                                    warn!("Timeout downloading Discord attachment: {}", filename);
+                                                                                    attachment_info.push(format!("[Attachment: {} (download timeout)]", filename));
                                                                                 }
                                                                             }
+                                                                        } else {
+                                                                            // Unsupported MIME type
+                                                                            attachment_info.push(format!("[Attachment: {} (unsupported type: {})]", filename, content_type));
                                                                         }
                                                                     }
+
+                                                                    // Append attachment info to message content for non-image files
+                                                                    if !attachment_info.is_empty() {
+                                                                        let mut content = inbound.content.clone();
+                                                                        if !content.is_empty() {
+                                                                            content.push_str("\n\n");
+                                                                        }
+                                                                        content.push_str(&attachment_info.join("\n"));
+                                                                        inbound.content = content;
+                                                                    }
                                                                 }
-                                                                if let Err(e) =
-                                                                    bus.publish_inbound(inbound).await
-                                                                {
-                                                                    error!(
-                                                                        "Failed to publish Discord inbound message: {}",
-                                                                        e
-                                                                    );
+
+                                                                // Only publish if message has content or media
+                                                                if !inbound.content.is_empty() || !inbound.media.is_empty() {
+                                                                    if let Err(e) = bus.publish_inbound(inbound).await {
+                                                                        error!(
+                                                                            "Failed to publish Discord inbound message: {}",
+                                                                            e
+                                                                        );
+                                                                    }
+                                                                } else {
+                                                                    debug!("Skipping empty Discord message after attachment processing");
                                                                 }
                                                             }
                                                         }
