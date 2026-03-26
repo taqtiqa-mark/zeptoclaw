@@ -1106,6 +1106,10 @@ fn default_telegram_allow_usernames() -> bool {
     true
 }
 
+fn default_telegram_reactions() -> bool {
+    true
+}
+
 /// Telegram channel configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1128,6 +1132,9 @@ pub struct TelegramConfig {
     /// New configs should keep this disabled and use numeric Telegram user IDs only.
     #[serde(default = "default_telegram_allow_usernames")]
     pub allow_usernames: bool,
+    /// Whether to show processing reactions (👀 on receipt, ✅ on completion).
+    #[serde(default = "default_telegram_reactions")]
+    pub reactions: bool,
 }
 
 impl Default for TelegramConfig {
@@ -1138,6 +1145,7 @@ impl Default for TelegramConfig {
             allow_from: Vec::new(),
             deny_by_default: false,
             allow_usernames: default_telegram_allow_usernames(),
+            reactions: default_telegram_reactions(),
         }
     }
 }

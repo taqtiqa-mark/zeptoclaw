@@ -78,6 +78,8 @@ use super::{BaseChannelConfig, Channel};
 struct Allowlist(Vec<String>);
 #[derive(Clone, Copy)]
 struct AllowUsernames(bool);
+#[derive(Clone, Copy)]
+struct ReactionsEnabled(bool);
 #[derive(Clone)]
 struct DefaultModel(String);
 #[derive(Clone)]
@@ -593,6 +595,7 @@ impl Channel for TelegramChannel {
             models: self.configured_models.clone(),
         };
         let longterm_memory = self.longterm_memory.clone();
+        let reactions_enabled = ReactionsEnabled(self.config.reactions);
         let http_client = self.http_client.clone();
         // Share the same running flag with the spawned task so state stays in sync
         let running_clone = Arc::clone(&self.running);
@@ -681,6 +684,7 @@ impl Channel for TelegramChannel {
                          Allowlist(allowlist): Allowlist,
                          AllowUsernames(allow_usernames): AllowUsernames,
                          deny_by_default: bool,
+                         ReactionsEnabled(reactions_enabled): ReactionsEnabled,
                          overrides_dep: OverridesDep,
                          DefaultModel(default_model): DefaultModel,
                          configured_providers_dep: ConfiguredProviders,
@@ -1002,6 +1006,20 @@ impl Channel for TelegramChannel {
                                     return Ok(());
                                 }
 
+                                // React with 👀 to acknowledge receipt before processing.
+                                if reactions_enabled {
+                                    use teloxide::types::ReactionType;
+                                    if let Err(e) = bot
+                                        .set_message_reaction(msg.chat.id, msg.id)
+                                        .reaction(vec![ReactionType::Emoji {
+                                            emoji: "\u{1F440}".to_string(),
+                                        }])
+                                        .await
+                                    {
+                                        debug!("Failed to set 👀 reaction: {}", e);
+                                    }
+                                }
+
                                 // Create and publish the inbound message
                                 let mut inbound =
                                     InboundMessage::new("telegram", &user_id, &chat_id, text);
@@ -1096,6 +1114,7 @@ impl Channel for TelegramChannel {
                         allowlist,
                         allow_usernames,
                         deny_by_default,
+                        reactions_enabled,
                         overrides_dep,
                         default_model,
                         configured_providers,
@@ -1175,7 +1194,7 @@ impl Channel for TelegramChannel {
     /// - The Telegram API request fails
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         use teloxide::prelude::*;
-        use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
+        use teloxide::types::{ChatId, MessageId, ParseMode, ReactionType, ReplyParameters};
 
         if !self.running.load(Ordering::SeqCst) {
             warn!("Telegram channel not running, cannot send message");
@@ -1240,6 +1259,23 @@ impl Channel for TelegramChannel {
 
         req.await
             .map_err(|e| ZeptoError::Channel(format!("Failed to send Telegram message: {}", e)))?;
+
+        // Replace 👀 with ✅ now that the reply was sent successfully.
+        if self.config.reactions {
+            if let Some(mid_str) = msg.metadata.get("telegram_message_id") {
+                if let Ok(mid) = mid_str.parse::<i32>() {
+                    if let Err(e) = bot
+                        .set_message_reaction(ChatId(chat_id), MessageId(mid))
+                        .reaction(vec![ReactionType::Emoji {
+                            emoji: "\u{2705}".to_string(),
+                        }])
+                        .await
+                    {
+                        debug!("Failed to set ✅ reaction: {}", e);
+                    }
+                }
+            }
+        }
 
         info!("Telegram: Message sent successfully to chat {}", chat_id);
         Ok(())
