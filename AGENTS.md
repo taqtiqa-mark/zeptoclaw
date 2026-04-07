@@ -52,6 +52,7 @@ Project-level guidance for coding agents working in this repository.
 - Config validation: `zeptoclaw config check` recognizes top-level `tunnel` and `r8r_bridge`, plus agent defaults such as `timezone`, `tool_timeout_secs`, and `system_prompt`
 - MCP transport: supports both HTTP and stdio MCP servers (`url` or `command` + args/env) with tool registration during `create_agent()`
 - Hands-lite: `HAND.toml` + bundled hands (`researcher`, `coder`, `monitor`) + `hand` CLI
+- Panel CLI fallback: feature-disabled builds still parse `zeptoclaw panel ...` and return explicit `--features panel` guidance instead of a raw unknown-subcommand error
 - Uninstall CLI: `zeptoclaw uninstall` removes `~/.zeptoclaw`; `--remove-binary` deletes direct installs in `~/.local/bin` or `/usr/local/bin` and defers Homebrew/Cargo binaries to their package managers
 - Process exit codes: explicit `main` mapping for success (0) and error (1); uncaught panic/crash remains Rust default (101)
 - Tests: current local validation passes `cargo fmt -- --check`, `cargo clippy -- -D warnings`, and `cargo test --doc` (128 passed, 27 ignored); `cargo nextest run --lib` is currently blocked by `auth::oauth::tests::test_callback_server_timeout` under nextest even though the same test passes when rerun with `cargo test`
