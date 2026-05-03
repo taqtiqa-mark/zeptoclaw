@@ -1,6 +1,6 @@
 # ZeptoClaw
 
-Ultra-lightweight personal AI assistant. Fresh configs default to `assistant` mode with dangerous tool approvals enabled.
+Fast, small, secure, local-first personal AI assistant infrastructure. Fresh configs default to `assistant` mode with dangerous tool approvals enabled.
 
 ## Quick Reference
 

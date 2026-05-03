@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">ZeptoClaw</h1>
 <p align="center">
-  <strong>Ultra-lightweight personal AI assistant.</strong>
+  <strong>Fast, small, secure, and local-first personal AI assistant infrastructure.</strong>
 </p>
 <p align="center">
   <a href="https://zeptoclaw.com/docs/"><img src="https://img.shields.io/badge/docs-zeptoclaw.com-3b82f6?style=for-the-badge&logo=bookstack&logoColor=white" alt="Documentation"></a>
@@ -31,7 +31,7 @@ $ zeptoclaw agent --stream -m "Analyze our API for security issues"
 ✓ Analysis complete in 4.2s
 ```
 
-We studied the best AI assistants — and their tradeoffs. OpenClaw's integrations without the 100MB. NanoClaw's security without the TypeScript bundle. NemoClaw's governance without the 2GB Docker container. PicoClaw's size without the bare-bones feature set. One Rust binary with 33 tools, 11 channels, 16 providers, and 6 sandbox runtimes.
+ZeptoClaw is one Rust binary for running personal AI agents locally, at the edge, or on a VPS — with tools, memory, channels, providers, and sandboxed autonomy built in. We studied the best AI assistants — and their tradeoffs: OpenClaw's integrations without the 100MB, NanoClaw's security without the TypeScript bundle, NemoClaw's governance without the 2GB Docker container, and PicoClaw's size without the bare-bones feature set.
 
 <p align="center">
   <img src="https://img.shields.io/badge/binary-~6MB-3b82f6" alt="~6MB binary">
@@ -272,7 +272,7 @@ Any provider's base URL can be overridden with `api_base` for proxies or self-ho
 
 ## Inspired By
 
-ZeptoClaw is inspired by projects in the open-source AI agent ecosystem — OpenClaw, NemoClaw, NanoClaw, and PicoClaw — each taking a different approach to the same problem. NemoClaw's declarative policy model and digest-verified supply chain influenced our security thinking. ZeptoClaw's contribution is Rust's memory safety, async performance, and container isolation for production multi-tenant deployments — all in a 6MB binary that runs where Docker containers can't.
+ZeptoClaw is inspired by projects in the open-source AI agent ecosystem — OpenClaw, NemoClaw, NanoClaw, and PicoClaw — each taking a different approach to the same problem. NemoClaw's declarative policy model and digest-verified supply chain influenced our security thinking. ZeptoClaw's contribution is Rust's memory safety, async performance, and configurable isolation for local-first, edge, and production multi-tenant deployments — all in a 6MB binary that runs where Docker containers can't.
 
 ## Usage
 
@@ -315,7 +315,7 @@ See [CLAUDE.md](CLAUDE.md) for full architecture reference, [AGENTS.md](AGENTS.m
 
 ## Zepto Stack
 
-ZeptoClaw is part of the Zepto stack — a modular system for running AI agents in production.
+ZeptoClaw is part of the Zepto stack — a modular local-first system for running on-device AI agents in production.
 
 ```
 ZeptoPM        — orchestration, supervision, retries, job lifecycle
@@ -336,7 +336,7 @@ ZeptoClaw      — LLM calls, tool use, artifact production
 | **ZeptoPM** | [qhkm/zeptopm](https://github.com/qhkm/zeptopm) | Process manager — config-driven daemon, HTTP API, pipelines, orchestration |
 | **ZeptoCapsule** | [qhkm/zeptocapsule](https://github.com/qhkm/zeptocapsule) | Sandbox — process/namespace/Firecracker isolation, resource limits, fallback chains |
 | **ZeptoRT** | [qhkm/zeptort](https://github.com/qhkm/zeptort) | Durable runtime — journaled effects, snapshot recovery, OTP-style supervision |
-| **ZeptoClaw** | [qhkm/zeptoclaw](https://github.com/qhkm/zeptoclaw) | Agent framework — 33 tools, 16 providers, 11 channels, container isolation |
+| **ZeptoClaw** | [qhkm/zeptoclaw](https://github.com/qhkm/zeptoclaw) | Personal AI assistant infrastructure — tools, memory, providers, channels, sandboxed autonomy |
 
 ## Contributing
 
@@ -358,7 +358,7 @@ ZeptoClaw is a pure open-source software project. It has no token, no cryptocurr
 ---
 
 <p align="center">
-  <em>ZeptoClaw — Because your AI assistant shouldn't need more RAM than your text editor.</em>
+  <em>ZeptoClaw — Local-first personal AI assistant infrastructure in one Rust binary.</em>
 </p>
 <p align="center">
   Built by <a href="https://aisar.ai">Aisar Labs</a>
